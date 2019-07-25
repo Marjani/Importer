@@ -1,0 +1,10 @@
+{
+    "RepositoryPath": "/home/marjani/Downloads/khabir",
+    "VisitLastDay": 30,
+    "DbIp": "192.168.1.4",
+    "DbPort": "5432",
+    "DbName": "newsdb",
+    "DbUsername": "news",
+    "DbPassword": "news"
+  }
+  
