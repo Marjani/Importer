@@ -89,7 +89,68 @@ public class PgSqlHelper
         }
     }
 
-    private void InsertAttachment(long newsId, string key, byte[] value)
+    internal long? AddRasadNews(RasadNews rasadNews, string folder, int line)
+    {
+        try
+        {
+            long rasadNewsSourceId;
+            long rasadNewsTypeId;
+            if (conn.State == ConnectionState.Closed)
+            {
+                conn.Open();
+            }
+            if (rasadNews.SourceId == null && defaultNewsSource == null)
+            {
+                logger.LogInformation("XML file and defual News SOURCE have not value!");
+                return null;
+            }
+            else
+            {
+                if (rasadNews.SourceId != null)
+                {
+                    rasadNewsSourceId = GetSourceIdWithCode(rasadNews.SourceId, conn);
+                    if (rasadNewsSourceId == 0 && defaultNewsSource == null)
+                    {
+                        logger.LogInformation("XML file and defual News SOURCE have not value!");
+                        return null;
+                    }
+                }
+            }
+
+            if (rasadNews.CategoryType == null && defaultNewsType == null)
+            {
+                logger.LogInformation("XML file and defual News TYPE have not value!");
+                return null;
+            }
+            else
+            {
+                if (rasadNews.CategoryType != null)
+                {
+                    rasadNewsTypeId = GetTypeIdWithCode(rasadNews.CategoryType, conn);
+                    if (rasadNewsTypeId == 0 && defaultNewsType == null)
+                    {
+                        logger.LogInformation("XML file and defual News TYPE have not value!");
+                        return null;
+                    }
+                }
+            }
+
+            long forignSourceId = InsertForignSource(rasadNews, folder, line);
+            return InsertNews(rasadNews, forignSourceId);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError("Error on insert news, ex:" + ex.Message);
+            return null;
+        }
+        finally
+        {
+            conn.Close();
+        }
+    }
+
+
+    internal void InsertAttachment(long newsId, string key, byte[] value)
     {
         var strInsertAttachmentCommand = @"INSERT INTO news.news_attachment(
             news_attachment_id, attachment_description, attachment_file, 
@@ -146,7 +207,7 @@ public class PgSqlHelper
 
         cmd.Parameters.AddWithValue("autor", rasadNews.Author);
         cmd.Parameters.AddWithValue("CategoryType", rasadNews.CategoryType);
-        cmd.Parameters.AddWithValue("Content", (rasadNews.Content.Length>10000)?rasadNews.Content.Substring(0,9999):rasadNews.Content);
+        cmd.Parameters.AddWithValue("Content", (rasadNews.Content.Length > 10000) ? rasadNews.Content.Substring(0, 9999) : rasadNews.Content);
         cmd.Parameters.AddWithValue("Description", rasadNews.Description);
         cmd.Parameters.AddWithValue("Title", rasadNews.Title);
 

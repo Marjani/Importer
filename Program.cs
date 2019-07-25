@@ -2,11 +2,14 @@
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.Threading;
 using System.Xml.Serialization;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using NLog;
 using NLog.Extensions.Logging;
+using System.Linq;
+
 
 namespace Marjani.Importer
 {
@@ -16,13 +19,23 @@ namespace Marjani.Importer
         private static readonly string configFileName = "config.json";
         private static readonly string stateFileName = "state.json";
         private static readonly string dateFormat = "yyyy-MM-dd";
+
+        private static readonly string newsStateFileName = "newsState.json";
+        private static readonly string dlStateFileName = "dlState.json";
+        private static readonly string mapFileName = "map.json";
+        private static readonly char spliter = '$';
+        private static Dictionary<long, long> map = new Dictionary<long, long>();
+        private static NewsState newsState = null;
+        private static DlState dlState = null;
+        private static Config config = null;
+        private static ILogger<Runner> logger = null;
         private static PgSqlHelper pgSqlHelprt;
         static void Main(string[] args)
         {
             #region  Log Config DI
             var servicesProvider = BuildDi();
             var runner = servicesProvider.GetRequiredService<Runner>();
-            var logger = runner._logger;
+            logger = runner._logger;
             #endregion
 
 
@@ -38,7 +51,7 @@ namespace Marjani.Importer
             }
             logger.LogInformation("Config file found, reading configuration ...");
             var strConfigs = System.IO.File.ReadAllText(configFileName);
-            var config = Newtonsoft.Json.JsonConvert.DeserializeObject<Config>(strConfigs);
+            config = Newtonsoft.Json.JsonConvert.DeserializeObject<Config>(strConfigs);
             logger.LogInformation("Config is:" + Environment.NewLine);
             logger.LogInformation(strConfigs);
             #endregion
@@ -57,113 +70,127 @@ namespace Marjani.Importer
             logger.LogInformation("State is:" + Environment.NewLine);
             logger.LogInformation(strState);
 
+
+            #region newsState
+            logger.LogInformation("Looking for  newsState file");
+            if (!System.IO.File.Exists(newsStateFileName))
+            {
+                logger.LogError("newsState file not found on " + Directory.GetCurrentDirectory());
+                Console.WriteLine("Press ANY key to exit");
+                return;
+            }
+            logger.LogInformation("newsState file found, reading configuration ...");
+            var strNewsState = System.IO.File.ReadAllText(newsStateFileName);
+            newsState = Newtonsoft.Json.JsonConvert.DeserializeObject<NewsState>(strNewsState);
+            logger.LogInformation("newsState is:" + Environment.NewLine);
+            logger.LogInformation(strNewsState);
             #endregion
 
-            #region Find start visit folder
-            var startVisitDate = new DateTime();
-            if (!string.IsNullOrEmpty(state.LastFolder))
+            #region dlState
+            logger.LogInformation("Looking for  dlState file");
+            if (!System.IO.File.Exists(dlStateFileName))
             {
-                try
-                {
-
-                    startVisitDate = DateTime.ParseExact(state.LastFolder, "yyyy-MM-dd", CultureInfo.InvariantCulture);
-                }
-                catch
-                {
-                    logger.LogError("State Config not in correct formate: [yyyy-MM-dd]");
-                    return;
-                }
+                logger.LogError("dlState file not found on " + Directory.GetCurrentDirectory());
+                Console.WriteLine("Press ANY key to exit");
+                return;
             }
-            else
-            {
-                if (config.VisitLastDay > 0)
-                {
-                    startVisitDate = startVisitDate.AddDays(config.VisitLastDay * -1);
-                }
-                else
-                {
-                    logger.LogError("Can't find start visit folder");
-                    EndOfProg();
-                }
-            }
-            logger.LogInformation("Start visit folder is " + startVisitDate.ToString("yyyy-MM-dd"));
+            logger.LogInformation("newsState file found, reading configuration ...");
+            var strDlState = System.IO.File.ReadAllText(dlStateFileName);
+            dlState = Newtonsoft.Json.JsonConvert.DeserializeObject<DlState>(strDlState);
+            logger.LogInformation("dlState is:" + Environment.NewLine);
+            logger.LogInformation(strDlState);
             #endregion
+
+            #region map
+            logger.LogInformation("Looking for  dlState file");
+            if (!System.IO.File.Exists(mapFileName))
+            {
+                logger.LogError("dlState file not found on " + Directory.GetCurrentDirectory());
+                Console.WriteLine("Press ANY key to exit");
+                return;
+            }
+            logger.LogInformation("newsState file found, reading configuration ...");
+            var strMapState = System.IO.File.ReadAllText(mapFileName);
+            map = Newtonsoft.Json.JsonConvert.DeserializeObject<Dictionary<long,long>>(strMapState);
+            logger.LogInformation("map is:" + Environment.NewLine);
+            logger.LogInformation(strMapState);
+            #endregion
+
+            #endregion
+
+            Thread updateNewsThread = new Thread(new ThreadStart(UpdateNews));
+            Thread updateDlThread = new Thread(new ThreadStart(UpdateDl));
+
+            updateNewsThread.Start();
+            updateDlThread.Start();
+
+            Console.WriteLine("End of prog");
+            Console.ReadKey();
+            // Ensure to flush and stop internal timers/threads before application-exit (Avoid segmentation fault on Linux)
+            NLog.LogManager.Shutdown();
+
+        }
+
+        private static void UpdateNews()
+        {
+            pgSqlHelprt = new PgSqlHelper(config, logger);
 
             #region Find folders to visit
+            var firstFolder = newsState.NewsId / 1000;
+            var directoriesNumber = new List<int>();
+            var directories = System.IO.Directory.GetDirectories(config.RepositoryPath);
 
-            if (startVisitDate.Date > DateTime.Now.Date)
+            if (directories != null && directories.Count() > 0)
             {
-                logger.LogError("Start visit folder is affter today, check the system clock");
-                EndOfProg();
-            }
-            List<string> foldersToVisit = new List<string>();
-            if (startVisitDate.Date == DateTime.Now.Date)
-            {
-                foldersToVisit.Add(DateTime.Now.ToString(dateFormat));
-            }
-            else
-            {
-                var dateConter = startVisitDate;
-                while (dateConter.ToString(dateFormat) != DateTime.Now.ToString(dateFormat))
+                foreach (var dic in directories)
                 {
-                    foldersToVisit.Add(dateConter.ToString(dateFormat));
-                    dateConter = dateConter.AddDays(1);
-                    Console.WriteLine(dateConter.ToString(dateFormat));
+                    int dicNumber = 0;
+                    if (int.TryParse(Path.GetDirectoryName(dic), out dicNumber))
+                    {
+                        if (dicNumber >= firstFolder)
+                        {
+                            directoriesNumber.Add(dicNumber);
+                        }
+                    }
                 }
-            }
-            if (foldersToVisit.Count > 0)
-            {
-                logger.LogInformation("Find " + foldersToVisit.Count + " folders for visit");
-
-            }
-            else
-            {
-                logger.LogError("Find nothing folder for visit");
-                EndOfProg();
             }
             #endregion
 
-            #region  Find last line
-            var lastLine = state.LastLine;
+            #region Find news to visit
+            var newsToVisit = new List<int>();
+            if (directoriesNumber != null && directoriesNumber.Count > 0)
+            {
+                #region news in First folder
+                newsToVisit.AddRange(
+                     System.IO.Directory.GetFiles(Path.Combine(config.RepositoryPath, directoriesNumber[0].ToString()), "*.xml")
+                     .Select(o => int.Parse(Path.GetFileNameWithoutExtension(o)))
+                     .Where(o => o > newsState.NewsId).ToList()
+                );
+                #endregion
+                #region  news in other folder
+                for (int i = 1; i < directoriesNumber.Count; i++)
+                {
+                    newsToVisit.AddRange(
+                    System.IO.Directory.GetFiles(Path.Combine(config.RepositoryPath, directoriesNumber[i].ToString()), "*.xml")
+                     .Select(o => int.Parse(Path.GetFileNameWithoutExtension(o))).ToList()
+                    );
+                }
+                #endregion
+            }
             #endregion
 
-            pgSqlHelprt = new PgSqlHelper(config, logger);
-            foreach (var currentFolder in foldersToVisit)
+            #region Loop on news
+            if (newsToVisit != null && newsToVisit.Count > 0)
             {
-                if (!System.IO.Directory.Exists(Path.Combine(config.RepositoryPath, currentFolder)))
+                foreach (var item in newsToVisit)
                 {
-                    logger.LogWarning("Folder "+currentFolder+" not found! continue next folder.");
-                    UpdateState(currentFolder,lastLine);
-                    continue;
-                }
-                var listFilePath = Path.Combine(config.RepositoryPath, currentFolder, "list_files.txt");
-                if (!System.IO.File.Exists(listFilePath))
-                {
-                    logger.LogWarning("List files not found in folder " + currentFolder + ", continue with next folder");
-                    UpdateState(currentFolder, lastLine);
-
-                    continue;
-                }
-                logger.LogInformation("List files found in folder " + currentFolder);
-                var lines = System.IO.File.ReadAllLines(listFilePath);
-
-                if (lastLine > lines.Length)
-                {
-                    logger.LogWarning("last line bigger than list file line count, continue with next folder");
-                    UpdateState(currentFolder, lastLine);
-
-                    continue;
-                }
-
-                for (int i = lastLine; i < lines.Length; i++)
-                {
-                    var filePX = lines[i];
-                    logger.LogInformation("Start to work on ['folder':'" + currentFolder + "', 'line':'" + i + "', 'file':'" + filePX + "']");
-                    var xmlFilePath = Path.Combine(config.RepositoryPath, currentFolder, filePX + ".xml");
+                    var currentFolder = item / 1000;
+                    logger.LogInformation("Start to work on ['folder':'" + (item / 1000).ToString() + "', 'File':'" + item + "']");
+                    var xmlFilePath = Path.Combine(config.RepositoryPath, (item / 1000).ToString(), item + ".xml");
                     if (!System.IO.File.Exists(xmlFilePath))
                     {
-                        logger.LogWarning("File " + filePX + ".xml not fount in " + currentFolder + ", continu to next line");
-                        UpdateState(currentFolder, i);
+                        logger.LogWarning("File " + item + ".xml not fount in " + currentFolder + ", continu to next line");
+                        UpdateNewsState(item);
                         continue;
                     }
                     RasadNews rasadNews = null;
@@ -181,44 +208,48 @@ namespace Marjani.Importer
                     }
                     catch (Exception ex)
                     {
-                        logger.LogError("Pars xml file(" + filePX + ") error, ex:" + ex.Message);
-                        UpdateState(currentFolder, i);
-
+                        logger.LogError("Pars xml file(" + item + ") error, ex:" + ex.Message);
+                        UpdateNewsState(item);
                         continue;
                     }
                     if (rasadNews == null)
                     {
-                        logger.LogError("Pars xml file(" + filePX + ") error, result is null");
-                        UpdateState(currentFolder, i);
+                        logger.LogError("Pars xml file(" + item + ") error, result is null");
+                        UpdateNewsState(item);
                         continue;
                     }
                     #endregion
                     try
                     {
-                        var attachments = new Dictionary<string, byte[]>();
-                        var attachmentFolderPath = Path.Combine(config.RepositoryPath, currentFolder, filePX);
-                        var files = System.IO.Directory.GetFiles(attachmentFolderPath);
-                        if (files != null && files.Length > 0)
+                        var insertedNewsId = pgSqlHelprt.AddRasadNews(rasadNews, currentFolder.ToString(), item);
+                        if (insertedNewsId.HasValue)
                         {
-                            foreach (var item in files)
-                            {
-                                attachments.Add(Path.GetFileName(item), System.IO.File.ReadAllBytes(item));
-                            }
+                            AddMapState(item, insertedNewsId.Value);
                         }
-                        pgSqlHelprt.AddRasadNews(rasadNews, attachments, currentFolder, lastLine);
                     }
                     catch (Exception ex)
                     {
 
                     }
-
-
+                    UpdateNewsState(item);
                 }
             }
-            Console.ReadLine();
+            #endregion
+        }
 
-            // Ensure to flush and stop internal timers/threads before application-exit (Avoid segmentation fault on Linux)
-            NLog.LogManager.Shutdown();
+        private static void UpdateDl()
+        {
+            pgSqlHelprt = new PgSqlHelper(config, logger);
+
+            var dlFileList = Path.Combine(config.RepositoryPath, "dl.txt");
+            var lines = File.ReadLines(dlFileList).Skip(dlState.Line).ToList();
+            foreach (var item in lines)
+            {
+                var newsId = int.Parse(item.Split(spliter)[0]);
+                var bytez = File.ReadAllBytes(Path.Combine(config.RepositoryPath, (newsId / 1000).ToString(), "dl", item));
+                pgSqlHelprt.InsertAttachment(newsId, item.Split(spliter).LastOrDefault(), bytez);
+                UpdateDlState(dlState.Line++);
+            }
 
         }
 
@@ -238,6 +269,36 @@ namespace Marjani.Importer
                 LastLine = line
             });
             System.IO.File.WriteAllText(stateFileName, strState);
+        }
+
+        private static void UpdateNewsState(int newsId)
+        {
+            newsState = new NewsState()
+            {
+                NewsId = newsId
+            };
+            var strState = Newtonsoft.Json.JsonConvert.SerializeObject(newsState);
+            System.IO.File.WriteAllText(newsStateFileName, strState);
+        }
+
+        private static void UpdateDlState(int line)
+        {
+            dlState = new DlState()
+            {
+                Line = line
+            };
+            var strState = Newtonsoft.Json.JsonConvert.SerializeObject(dlState);
+            System.IO.File.WriteAllText(dlStateFileName, strState);
+        }
+
+        private static void AddMapState(long newsId, long news_id)
+        {
+            if (!map.ContainsKey(newsId))
+            {
+                map.Add(newsId, news_id);
+                var strState = Newtonsoft.Json.JsonConvert.SerializeObject(map);
+                System.IO.File.WriteAllText(mapFileName, strState);
+            }
         }
         private static ServiceProvider BuildDi()
         {
